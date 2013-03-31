@@ -12,6 +12,7 @@ Implements the Quepy Application API
 """
 
 import logging
+import sys
 from types import ModuleType
 
 from quepy import settings
@@ -46,6 +47,11 @@ def install(app_name):
         except ImportError, error:
             message = u"Error importing {0!r}: {1}"
             raise QuepyImportError(message.format(module_name, error))
+    try:
+        modules[u"printout"] = __import__(u"{0}.printout".format(app_name), 
+            fromlist=[None])
+    except ImportError:
+        modules[u"printout"] = None
 
     return QuepyApp(**modules)
 
@@ -61,10 +67,10 @@ class QuepyApp(object):
     Provides the quepy application API.
     """
 
-    def __init__(self, regex, settings, semantics):
+    def __init__(self, regex, settings, semantics, printout=None):
         """
-        Creates the application based on `regex`, `settings` and
-        `semantics` modules.
+        Creates the application based on `regex`, `settings`,
+        `semantics` and `printout` modules.
         """
 
         assert isinstance(regex, ModuleType)
@@ -74,6 +80,7 @@ class QuepyApp(object):
         self._regex_module = regex
         self._settings_module = settings
         self._semantics_module = semantics
+        self._printout_module = printout
 
         # Save the settings right after loading settings module
         self._save_settings_values()
@@ -94,7 +101,7 @@ class QuepyApp(object):
 
         self.rules.sort(key=lambda x: x.weight, reverse=True)
 
-    def get_query(self, question):
+    def get_query(self, question, query_lang='sparql'):
         """
         Given `question` in natural language, it returns
         three things:
@@ -108,11 +115,11 @@ class QuepyApp(object):
         """
 
         question = question_sanitize(question)
-        for target, sparql_query, userdata in self.get_queries(question):
-            return target, sparql_query, userdata
+        for target, query, userdata in self.get_queries(question, query_lang):
+            return target, query, userdata
         return None, None, None
 
-    def get_queries(self, question):
+    def get_queries(self, question, query_lang='sparql'):
         """
         Given `question` in natural language, it returns
         three things:
@@ -124,13 +131,31 @@ class QuepyApp(object):
         The queries returned corresponds to the regexes that match in
         weight order.
         """
-        question = encoding_flexible_conversion(question)
-        for expression, userdata in self._iter_compiled_forms(question):
-            target, sparql_query = expression_to_sparql(expression)
-            logger.debug(u"Semantics {1}: {0}".format(str(expression),
-                         expression.rule_used))
-            logger.debug(u"Query generated: {0}".format(sparql_query))
-            yield target, sparql_query, userdata
+        printout_func = None
+        if self._printout_module:
+            try:
+                printout_func = getattr(self._printout_module, 
+                    "expression_to_%s" % query_lang.lower())
+            except AttributeError:
+                pass
+        if not printout_func:
+            try:
+                printout_func = getattr(sys.modules["quepy.printout"], 
+                    "expression_to_%s" % query_lang.lower())
+            except AttributeError:
+                pass
+        if printout_func:
+            question = encoding_flexible_conversion(question)
+            for expression, userdata in self._iter_compiled_forms(question):
+                target = None
+                query = printout_func(expression)
+                logger.debug(u"Semantics {1}: {0}".format(str(expression),
+                             expression.rule_used))
+                logger.debug(u"Query generated: {0}".format(query))
+                yield target, query, userdata
+        else:
+            logger.error(u"Can't find an expression serialization for: '%s'", 
+                query_lang)
 
     def _iter_compiled_forms(self, question):
         """
